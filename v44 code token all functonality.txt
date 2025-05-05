@@ -1,0 +1,1567 @@
+import React, { useState, useRef, useEffect } from 'react';
+import { Circle, Square, Plus, ArrowRight, Zap, Play, Trash2, PlayCircle, PauseCircle, RotateCcw, ChevronDown, Settings, Save, Upload, FileText, Shield, Cpu, GitBranch, AlertTriangle } from 'lucide-react';
+
+const PetriNetToLadderConverter = () => {
+  // Core state
+  const [places, setPlaces] = useState([]);
+  const [transitions, setTransitions] = useState([]);
+  const [arcs, setArcs] = useState([]);
+  const [mode, setMode] = useState('PLACE');
+  const [selectedElement, setSelectedElement] = useState(null);
+  const [ladderOutput, setLadderOutput] = useState('');
+  const [isSimulating, setIsSimulating] = useState(false);
+  const [simulationTime, setSimulationTime] = useState(0);
+  const [transitionTimers, setTransitionTimers] = useState({});
+  
+  // UI state
+  const [showTimedDialog, setShowTimedDialog] = useState(false);
+  const [pendingTimedTransition, setPendingTimedTransition] = useState(null);
+  const [timedDelay, setTimedDelay] = useState('1000');
+  const [analysisOutput, setAnalysisOutput] = useState('');
+  const [showAnalysisDialog, setShowAnalysisDialog] = useState(false);
+  const [analysisHistory, setAnalysisHistory] = useState([]);
+  const [reachabilityGraph, setReachabilityGraph] = useState(null);
+  const [activeTab, setActiveTab] = useState('output');
+  const [activeDropdown, setActiveDropdown] = useState(null);
+  
+  // Advanced features state
+  const [conversionOptions, setConversionOptions] = useState({
+    plcType: 'GENERIC',
+    language: 'LADDER',
+    safetyLevel: 'NONE',
+    optimizationLevel: 'STANDARD',
+    includeComments: true,
+    generateDiagnostics: false,
+    errorHandling: 'MANUAL',
+    conflictResolution: 'PRIORITY',
+    generateTests: false
+  });
+  
+  const [ioMapping, setIoMapping] = useState({});
+  const [priorities, setPriorities] = useState({});
+  const [weights, setWeights] = useState({});
+  const [arcTypes, setArcTypes] = useState({});
+  
+  const canvasRef = useRef(null);
+
+  // Dropdown menu structure
+  const menuItems = {
+    file: {
+      title: 'File',
+      icon: <FileText size={16} />,
+      items: [
+        { label: 'New', action: () => resetAll() },
+        { label: 'Save', action: () => saveProject() },
+        { label: 'Load', action: () => loadProject() },
+        { label: 'Export Ladder', action: () => exportLadder() },
+        { label: 'Export Documentation', action: () => generateDocumentation() }
+      ]
+    },
+    elements: {
+      title: 'Elements',
+      icon: <Circle size={16} />,
+      items: [
+        { label: 'Place', action: () => setMode('PLACE') },
+        { label: 'Transition', action: () => setMode('TRANSITION') },
+        { label: 'Timed Transition', action: () => setMode('TIMED_TRANSITION') },
+        { label: 'Priority Transition', action: () => setMode('PRIORITY_TRANSITION') },
+        { label: 'Arc', action: () => setMode('ARC') },
+        { label: 'Inhibitor Arc', action: () => setMode('INHIBITOR_ARC') },
+        { label: 'Weighted Arc', action: () => setMode('WEIGHTED_ARC') },
+        { label: 'Add Token', action: () => setMode('TOKEN') }
+      ]
+    },
+    conversion: {
+      title: 'Conversion',
+      icon: <Settings size={16} />,
+      items: [
+        { 
+          label: 'PLC Type', 
+          submenu: ['GENERIC', 'SIEMENS', 'ALLEN_BRADLEY', 'MITSUBISHI', 'OMRON'],
+          action: (value) => setConversionOptions(prev => ({ ...prev, plcType: value }))
+        },
+        { 
+          label: 'Safety Level', 
+          submenu: ['NONE', 'SIL1', 'SIL2', 'SIL3'],
+          action: (value) => setConversionOptions(prev => ({ ...prev, safetyLevel: value }))
+        },
+        { 
+          label: 'Optimization', 
+          submenu: ['NONE', 'STANDARD', 'HIGH'],
+          action: (value) => setConversionOptions(prev => ({ ...prev, optimizationLevel: value }))
+        },
+        { 
+          label: 'Error Handling', 
+          submenu: ['MANUAL', 'AUTOMATIC', 'SUPERVISED'],
+          action: (value) => setConversionOptions(prev => ({ ...prev, errorHandling: value }))
+        },
+        { label: 'Configure I/O', action: () => setActiveTab('io-config') }
+      ]
+    },
+    analysis: {
+      title: 'Analysis',
+      icon: <GitBranch size={16} />,
+      items: [
+        { label: 'Complete Analysis', action: () => runCompleteAnalysis() },
+        { label: 'Reachability', action: () => analyzeReachability() },
+        { label: 'Liveness', action: () => analyzeLiveness() },
+        { label: 'Deadlock', action: () => checkDeadlock() },
+        { label: 'Conflicts', action: () => detectAndShowConflicts() },
+        { label: 'Validate', action: () => validatePetriNet() }
+      ]
+    },
+    safety: {
+      title: 'Safety',
+      icon: <Shield size={16} />,
+      items: [
+        { label: 'Add Interlocks', action: () => addSafetyInterlocks() },
+        { label: 'Emergency Stop', action: () => addEmergencyStop() },
+        { label: 'Watchdog Timers', action: () => addWatchdogTimers() },
+        { label: 'Safety Report', action: () => generateSafetyReport() }
+      ]
+    }
+  };
+
+  // Advanced features implementation
+  const detectConflicts = () => {
+    const conflicts = [];
+    transitions.forEach((t1, i) => {
+      transitions.forEach((t2, j) => {
+        if (i < j) {
+          const t1Inputs = arcs
+            .filter(arc => arc.to.type === 'transition' && arc.to.id === i)
+            .map(arc => arc.from.id);
+          const t2Inputs = arcs
+            .filter(arc => arc.to.type === 'transition' && arc.to.id === j)
+            .map(arc => arc.from.id);
+          const shared = t1Inputs.filter(p => t2Inputs.includes(p));
+          if (shared.length > 0) {
+            conflicts.push({t1: i, t2: j, shared});
+          }
+        }
+      });
+    });
+    return conflicts;
+  };
+
+  const generateMutexLogic = (conflicts) => {
+    let ladder = "(* Conflict Resolution Logic *)\n";
+    conflicts.forEach(conflict => {
+      ladder += `(* Mutual Exclusion for T${conflict.t1+1} and T${conflict.t2+1} *)\n`;
+      ladder += `VAR mutex_${conflict.t1}_${conflict.t2} : BOOL; END_VAR\n`;
+      
+      if (conversionOptions.conflictResolution === 'PRIORITY') {
+        const p1 = priorities[conflict.t1] || 0;
+        const p2 = priorities[conflict.t2] || 0;
+        if (p1 !== p2) {
+          ladder += `(* Priority: T${p1 > p2 ? conflict.t1+1 : conflict.t2+1} has higher priority *)\n`;
+        }
+      }
+    });
+    return ladder;
+  };
+
+  const generatePLCSpecificCode = (plcType) => {
+    const headers = {
+      'SIEMENS': 'ORGANIZATION_BLOCK OB1\nVAR_TEMP\nEND_VAR\n',
+      'ALLEN_BRADLEY': 'PROGRAM MainProgram\n',
+      'MITSUBISHI': 'POU MainProgram\n',
+      'GENERIC': '(* Generic PLC Code *)\n'
+    };
+    return headers[plcType] || headers['GENERIC'];
+  };
+
+  const generateIOConfiguration = () => {
+    let config = "(* I/O Configuration *)\n";
+    Object.entries(ioMapping).forEach(([element, io]) => {
+      config += `VAR ${element}_physical AT %${io.address} : BOOL; (* ${io.description} *) END_VAR\n`;
+    });
+    return config;
+  };
+
+  const validatePetriNet = () => {
+    const errors = [];
+    const warnings = [];
+    
+    // Check for isolated elements
+    places.forEach((place, i) => {
+      const hasArcs = arcs.some(arc => 
+        (arc.from.type === 'place' && arc.from.id === i) ||
+        (arc.to.type === 'place' && arc.to.id === i)
+      );
+      if (!hasArcs) errors.push(`Place P${i+1} is isolated`);
+    });
+    
+    transitions.forEach((transition, i) => {
+      const hasInputs = arcs.some(arc => arc.to.type === 'transition' && arc.to.id === i);
+      const hasOutputs = arcs.some(arc => arc.from.type === 'transition' && arc.from.id === i);
+      if (!hasInputs) warnings.push(`Transition T${i+1} has no inputs`);
+      if (!hasOutputs) warnings.push(`Transition T${i+1} has no outputs`);
+    });
+    
+    // Check for conflicts
+    const conflicts = detectConflicts();
+    if (conflicts.length > 0) {
+      warnings.push(`${conflicts.length} potential conflicts detected`);
+    }
+    
+    // Check for deadlocks
+    if (places.every(p => p.tokens === 0)) {
+      errors.push("No initial marking defined");
+    }
+    
+    const result = {
+      isValid: errors.length === 0,
+      errors,
+      warnings
+    };
+    
+    const output = `=== Validation Results ===\n\n` +
+      `Status: ${result.isValid ? '✅ Valid' : '❌ Invalid'}\n\n` +
+      `Errors (${errors.length}):\n${errors.join('\n') || 'None'}\n\n` +
+      `Warnings (${warnings.length}):\n${warnings.join('\n') || 'None'}`;
+    
+    setAnalysisOutput(output);
+    return result;
+  };
+
+  const generateSafetyInterlocks = () => {
+    let ladder = "(* Safety Interlocks *)\n";
+    
+    if (conversionOptions.safetyLevel !== 'NONE') {
+      ladder += `VAR safety_ok : BOOL := FALSE; END_VAR\n`;
+      ladder += `VAR emergency_stop : BOOL := FALSE; END_VAR\n\n`;
+      
+      // Add safety conditions for each transition
+      transitions.forEach((t, i) => {
+        ladder += `(* Safety check for T${i+1} *)\n`;
+        ladder += `|--[safety_ok]--[/emergency_stop]--[T${i+1}_enable]--|\n\n`;
+      });
+    }
+    
+    return ladder;
+  };
+
+  const convertToLadderAdvanced = () => {
+    // Validate first
+    const validation = validatePetriNet();
+    if (!validation.isValid && conversionOptions.errorHandling === 'MANUAL') {
+      setLadderOutput(`Validation failed:\n${validation.errors.join('\n')}`);
+      return;
+    }
+    
+    let ladder = generatePLCSpecificCode(conversionOptions.plcType);
+    
+    // Add I/O configuration if mapped
+    if (Object.keys(ioMapping).length > 0) {
+      ladder += generateIOConfiguration();
+    }
+    
+    // Generate variables
+    ladder += "\n(* Place Variables *)\n";
+    places.forEach((place, index) => {
+      ladder += `VAR P${index + 1} : BOOL; END_VAR\n`;
+    });
+    
+    ladder += "\n(* Transition Variables *)\n";
+    transitions.forEach((transition, index) => {
+      ladder += `VAR T${index + 1} : BOOL; END_VAR\n`;
+      if (transition.isTimed) {
+        ladder += `VAR T${index + 1}_timer : TON; END_VAR\n`;
+      }
+    });
+    
+    // Add safety interlocks
+    if (conversionOptions.safetyLevel !== 'NONE') {
+      ladder += "\n" + generateSafetyInterlocks();
+    }
+    
+    // Add conflict resolution
+    const conflicts = detectConflicts();
+    if (conflicts.length > 0) {
+      ladder += "\n" + generateMutexLogic(conflicts);
+    }
+    
+    // Generate main logic
+    ladder += "\n(* Main Ladder Logic *)\n";
+    transitions.forEach((transition, tIndex) => {
+      ladder += generateTransitionLogic(transition, tIndex);
+    });
+    
+    // Add diagnostics if enabled
+    if (conversionOptions.generateDiagnostics) {
+      ladder += "\n" + generateDiagnostics();
+    }
+    
+    setLadderOutput(ladder);
+  };
+
+  const generateTransitionLogic = (transition, tIndex) => {
+    let logic = `(* Transition T${tIndex + 1} *)\n`;
+    
+    // Find input and output places
+    const inputPlaces = arcs
+      .filter(arc => arc.to.type === 'transition' && arc.to.id === tIndex)
+      .map(arc => ({
+        id: arc.from.id,
+        weight: weights[`${arc.from.type}_${arc.from.id}_${arc.to.type}_${arc.to.id}`] || 1,
+        type: arcTypes[`${arc.from.type}_${arc.from.id}_${arc.to.type}_${arc.to.id}`] || 'normal'
+      }));
+    
+    const outputPlaces = arcs
+      .filter(arc => arc.from.type === 'transition' && arc.from.id === tIndex)
+      .map(arc => ({
+        id: arc.to.id,
+        weight: weights[`${arc.from.type}_${arc.from.id}_${arc.to.type}_${arc.to.id}`] || 1
+      }));
+    
+    // Generate firing condition
+    if (inputPlaces.length > 0) {
+      logic += "|--";
+      
+      // Add safety check if enabled
+      if (conversionOptions.safetyLevel !== 'NONE') {
+        logic += "[safety_ok]--";
+      }
+      
+      // Add input conditions
+      inputPlaces.forEach((input, i) => {
+        if (input.type === 'inhibitor') {
+          logic += `[/P${input.id + 1}]`;
+        } else {
+          logic += `[P${input.id + 1}]`;
+        }
+        if (i < inputPlaces.length - 1) logic += "--";
+      });
+      
+      // Add timer for timed transitions
+      if (transition.isTimed) {
+        logic += `--[TON T${tIndex + 1}_timer PT:${transition.delay}ms]`;
+      }
+      
+      logic += `--(T${tIndex + 1})--|\n`;
+      
+      // Create output actions
+      outputPlaces.forEach(output => {
+        logic += `|--[T${tIndex + 1}]--(P${output.id + 1})--|\n`;
+      });
+      
+      // Reset input places
+      inputPlaces.forEach(input => {
+        if (input.type !== 'inhibitor') {
+          logic += `|--[T${tIndex + 1}]--(/R P${input.id + 1})--|\n`;
+        }
+      });
+    }
+    
+    return logic + "\n";
+  };
+
+  // UI Components
+  const DropdownMenu = ({ menu, isOpen, onToggle }) => (
+    <div className="relative">
+      <button
+        onClick={() => onToggle(menu.title)}
+        className={`flex items-center gap-2 px-3 py-2 rounded hover:bg-gray-200 ${
+          isOpen ? 'bg-gray-200' : ''
+        }`}
+      >
+        {menu.icon}
+        {menu.title}
+        <ChevronDown size={14} className={`transform transition-transform ${isOpen ? 'rotate-180' : ''}`} />
+      </button>
+      {isOpen && (
+        <div className="absolute top-full left-0 mt-1 bg-white border rounded shadow-lg z-50 min-w-48">
+          {menu.items.map((item, idx) => (
+            <div key={idx}>
+              {item.submenu ? (
+                <div className="relative group">
+                  <button className="w-full text-left px-4 py-2 hover:bg-gray-100 flex justify-between items-center">
+                    {item.label}
+                    <ChevronDown size={14} className="transform -rotate-90" />
+                  </button>
+                  <div className="absolute left-full top-0 hidden group-hover:block bg-white border rounded shadow-lg">
+                    {item.submenu.map((subItem, subIdx) => (
+                      <button
+                        key={subIdx}
+                        onClick={() => {
+                          if (item.action) {
+                            item.action(subItem);
+                          }
+                          onToggle(null);
+                        }}
+                        className={`block w-full text-left px-4 py-2 hover:bg-gray-100 whitespace-nowrap ${
+                          item.label === 'PLC Type' && conversionOptions.plcType === subItem ? 'bg-blue-100' :
+                          item.label === 'Safety Level' && conversionOptions.safetyLevel === subItem ? 'bg-blue-100' :
+                          item.label === 'Optimization' && conversionOptions.optimizationLevel === subItem ? 'bg-blue-100' :
+                          item.label === 'Error Handling' && conversionOptions.errorHandling === subItem ? 'bg-blue-100' :
+                          ''
+                        }`}
+                      >
+                        {subItem}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <button
+                  onClick={() => {
+                    item.action();
+                    onToggle(null);
+                  }}
+                  className="block w-full text-left px-4 py-2 hover:bg-gray-100"
+                >
+                  {item.label}
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+
+  // Draw canvas
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    
+    // Draw arcs
+    arcs.forEach(arc => {
+      const from = arc.from.type === 'place' ? places[arc.from.id] : transitions[arc.from.id];
+      const to = arc.to.type === 'place' ? places[arc.to.id] : transitions[arc.to.id];
+      
+      if (from && to) {
+        const arcKey = `${arc.from.type}_${arc.from.id}_${arc.to.type}_${arc.to.id}`;
+        const arcType = arcTypes[arcKey] || 'normal';
+        const weight = weights[arcKey] || 1;
+        
+        ctx.beginPath();
+        ctx.strokeStyle = arcType === 'inhibitor' ? '#ef4444' : '#000';
+        ctx.lineWidth = weight > 1 ? 3 : 2;
+        ctx.moveTo(from.x, from.y);
+        ctx.lineTo(to.x, to.y);
+        ctx.stroke();
+        
+        // Draw arrow head or circle for inhibitor
+        const angle = Math.atan2(to.y - from.y, to.x - from.x);
+        if (arcType === 'inhibitor') {
+          ctx.beginPath();
+          ctx.arc(
+            to.x - 20 * Math.cos(angle),
+            to.y - 20 * Math.sin(angle),
+            5, 0, 2 * Math.PI
+          );
+          ctx.fillStyle = '#ef4444';
+          ctx.fill();
+        } else {
+          const headlen = 10;
+          ctx.beginPath();
+          ctx.moveTo(to.x, to.y);
+          ctx.lineTo(to.x - headlen * Math.cos(angle - Math.PI / 6),
+                     to.y - headlen * Math.sin(angle - Math.PI / 6));
+          ctx.moveTo(to.x, to.y);
+          ctx.lineTo(to.x - headlen * Math.cos(angle + Math.PI / 6),
+                     to.y - headlen * Math.sin(angle + Math.PI / 6));
+          ctx.stroke();
+        }
+        
+        // Draw weight if > 1
+        if (weight > 1) {
+          ctx.fillStyle = '#000';
+          ctx.font = '12px Arial';
+          ctx.fillText(weight.toString(), (from.x + to.x) / 2, (from.y + to.y) / 2 - 10);
+        }
+      }
+    });
+    
+    // Draw places
+    places.forEach((place, index) => {
+      ctx.fillStyle = '#fff';
+      ctx.strokeStyle = '#000';
+      ctx.beginPath();
+      ctx.arc(place.x, place.y, 20, 0, 2 * Math.PI);
+      ctx.fill();
+      ctx.stroke();
+      
+      // Draw tokens
+      if (place.tokens > 0) {
+        ctx.fillStyle = '#000';
+        ctx.beginPath();
+        ctx.arc(place.x, place.y, 5, 0, 2 * Math.PI);
+        ctx.fill();
+        
+        if (place.tokens > 1) {
+          ctx.font = '12px Arial';
+          ctx.fillText(place.tokens.toString(), place.x + 25, place.y + 5);
+        }
+      }
+      
+      // Draw label
+      ctx.fillStyle = '#000';
+      ctx.font = '14px Arial';
+      ctx.fillText(`P${index + 1}`, place.x - 10, place.y - 25);
+      
+      // Draw I/O mapping if exists
+      if (ioMapping[`P${index + 1}`]) {
+        ctx.font = '10px Arial';
+        ctx.fillStyle = '#3b82f6';
+        ctx.fillText(ioMapping[`P${index + 1}`].address, place.x - 15, place.y + 35);
+      }
+    });
+    
+    // Draw transitions
+    transitions.forEach((transition, index) => {
+      const isEnabled = isTransitionEnabled(index);
+      const isActive = transitionTimers[index]?.active;
+      const priority = priorities[index];
+      
+      // Color based on state
+      if (isActive) {
+        ctx.fillStyle = '#22c55e';
+      } else if (isEnabled) {
+        ctx.fillStyle = '#eab308';
+      } else {
+        ctx.fillStyle = transition.isTimed ? '#3b82f6' : '#000';
+      }
+      
+      ctx.fillRect(transition.x - 5, transition.y - 20, 10, 40);
+      
+      // Draw label
+      ctx.fillStyle = '#000';
+      ctx.font = '14px Arial';
+      ctx.fillText(`T${index + 1}`, transition.x - 10, transition.y - 25);
+      
+      // Draw priority if set
+      if (priority !== undefined) {
+        ctx.font = '10px Arial';
+        ctx.fillStyle = '#ef4444';
+        ctx.fillText(`P:${priority}`, transition.x - 15, transition.y - 35);
+      }
+      
+      // Draw timing info
+      if (transition.isTimed && transition.delay) {
+        ctx.font = '12px Arial';
+        ctx.fillText(`${transition.delay}ms`, transition.x - 20, transition.y + 35);
+        
+        if (isActive && transitionTimers[index]) {
+          const remainingTime = Math.max(0, transition.delay - transitionTimers[index].elapsed);
+          ctx.fillText(`${Math.ceil(remainingTime)}ms`, transition.x - 20, transition.y + 50);
+        }
+      }
+    });
+  }, [places, transitions, arcs, transitionTimers, ioMapping, priorities, weights, arcTypes]);
+
+  // Core functionality
+  const findElementAt = (x, y) => {
+    // Check places
+    for (let i = 0; i < places.length; i++) {
+      const place = places[i];
+      if (Math.sqrt((place.x - x) ** 2 + (place.y - y) ** 2) < 20) {
+        return { type: 'place', id: i };
+      }
+    }
+    
+    // Check transitions
+    for (let i = 0; i < transitions.length; i++) {
+      const transition = transitions[i];
+      if (Math.abs(transition.x - x) < 10 && Math.abs(transition.y - y) < 20) {
+        return { type: 'transition', id: i };
+      }
+    }
+    
+    return null;
+  };
+
+  const isTransitionEnabled = (transitionIndex) => {
+    const inputArcs = arcs.filter(arc => 
+      arc.to.type === 'transition' && arc.to.id === transitionIndex
+    );
+    
+    return inputArcs.every(arc => {
+      if (arc.from.type === 'place') {
+        const arcKey = `${arc.from.type}_${arc.from.id}_${arc.to.type}_${arc.to.id}`;
+        const arcType = arcTypes[arcKey] || 'normal';
+        const weight = weights[arcKey] || 1;
+        
+        if (arcType === 'inhibitor') {
+          return places[arc.from.id].tokens === 0;
+        } else {
+          return places[arc.from.id].tokens >= weight;
+        }
+      }
+      return false;
+    });
+  };
+
+  const fireTransition = (transitionIndex) => {
+    const inputArcs = arcs.filter(arc => 
+      arc.to.type === 'transition' && arc.to.id === transitionIndex
+    );
+    
+    const outputArcs = arcs.filter(arc => 
+      arc.from.type === 'transition' && arc.from.id === transitionIndex
+    );
+    
+    const newPlaces = [...places];
+    
+    // Remove tokens from input places
+    inputArcs.forEach(arc => {
+      if (arc.from.type === 'place') {
+        const arcKey = `${arc.from.type}_${arc.from.id}_${arc.to.type}_${arc.to.id}`;
+        const arcType = arcTypes[arcKey] || 'normal';
+        const weight = weights[arcKey] || 1;
+        
+        if (arcType !== 'inhibitor') {
+          newPlaces[arc.from.id].tokens = Math.max(0, newPlaces[arc.from.id].tokens - weight);
+        }
+      }
+    });
+    
+    // Add tokens to output places
+    outputArcs.forEach(arc => {
+      if (arc.to.type === 'place') {
+        const arcKey = `${arc.from.type}_${arc.from.id}_${arc.to.type}_${arc.to.id}`;
+        const weight = weights[arcKey] || 1;
+        newPlaces[arc.to.id].tokens = (newPlaces[arc.to.id].tokens || 0) + weight;
+      }
+    });
+    
+    setPlaces(newPlaces);
+  };
+
+  const handleCanvasClick = (e) => {
+    const canvas = canvasRef.current;
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    
+    if (isSimulating) {
+      const element = findElementAt(x, y);
+      if (element && element.type === 'transition') {
+        if (isTransitionEnabled(element.id)) {
+          fireTransition(element.id);
+        }
+      }
+      return;
+    }
+    
+    switch (mode) {
+      case 'PLACE':
+        setPlaces([...places, { x, y, tokens: 0 }]);
+        break;
+      case 'TRANSITION':
+        setTransitions([...transitions, { x, y, isTimed: false }]);
+        break;
+      case 'TIMED_TRANSITION':
+        setPendingTimedTransition({ x, y });
+        setShowTimedDialog(true);
+        break;
+      case 'PRIORITY_TRANSITION':
+        const priority = prompt('Enter priority (0-9):', '0');
+        if (priority !== null && !isNaN(parseInt(priority))) {
+          const newId = transitions.length;
+          setTransitions([...transitions, { x, y, isTimed: false }]);
+          setPriorities(prev => ({ ...prev, [newId]: parseInt(priority) }));
+        }
+        break;
+      case 'ARC':
+        handleArcCreation(x, y, 'normal');
+        break;
+      case 'INHIBITOR_ARC':
+        handleArcCreation(x, y, 'inhibitor');
+        break;
+      case 'WEIGHTED_ARC':
+        handleArcCreation(x, y, 'weighted');
+        break;
+      case 'TOKEN':
+        handleTokenAddition(x, y);
+        break;
+      case 'DELETE':
+        handleDeletion(x, y);
+        break;
+    }
+  };
+
+  const handleArcCreation = (x, y, type) => {
+    const element = findElementAt(x, y);
+    if (!element) return;
+    
+    if (!selectedElement) {
+      setSelectedElement(element);
+    } else {
+      if (selectedElement.type !== element.type) {
+        const arcKey = `${selectedElement.type}_${selectedElement.id}_${element.type}_${element.id}`;
+        
+        // Set arc type
+        setArcTypes(prev => ({ ...prev, [arcKey]: type }));
+        
+        // If weighted, ask for weight
+        if (type === 'weighted') {
+          const weight = prompt('Enter arc weight:', '2');
+          if (weight && !isNaN(parseInt(weight))) {
+            setWeights(prev => ({ ...prev, [arcKey]: parseInt(weight) }));
+          }
+        }
+        
+        setArcs([...arcs, { from: selectedElement, to: element }]);
+      }
+      setSelectedElement(null);
+    }
+  };
+
+  const handleTokenAddition = (x, y) => {
+    const element = findElementAt(x, y);
+    if (element && element.type === 'place') {
+      const newPlaces = [...places];
+      newPlaces[element.id].tokens = (newPlaces[element.id].tokens || 0) + 1;
+      setPlaces(newPlaces);
+    }
+  };
+
+  const handleDeletion = (x, y) => {
+    const element = findElementAt(x, y);
+    if (!element) return;
+    
+    if (element.type === 'place') {
+      // Remove the place
+      const newPlaces = places.filter((_, index) => index !== element.id);
+      setPlaces(newPlaces);
+      
+      // Remove related arcs
+      const newArcs = arcs.filter(arc => 
+        !(arc.from.type === 'place' && arc.from.id === element.id) &&
+        !(arc.to.type === 'place' && arc.to.id === element.id)
+      );
+      
+      // Update arc indices
+      const updatedArcs = newArcs.map(arc => {
+        if (arc.from.type === 'place' && arc.from.id > element.id) {
+          return { ...arc, from: { ...arc.from, id: arc.from.id - 1 } };
+        }
+        if (arc.to.type === 'place' && arc.to.id > element.id) {
+          return { ...arc, to: { ...arc.to, id: arc.to.id - 1 } };
+        }
+        return arc;
+      });
+      
+      setArcs(updatedArcs);
+    } else {
+      // Remove the transition
+      const newTransitions = transitions.filter((_, index) => index !== element.id);
+      setTransitions(newTransitions);
+      
+      // Remove related arcs
+      const newArcs = arcs.filter(arc => 
+        !(arc.from.type === 'transition' && arc.from.id === element.id) &&
+        !(arc.to.type === 'transition' && arc.to.id === element.id)
+      );
+      
+      // Update arc indices
+      const updatedArcs = newArcs.map(arc => {
+        if (arc.from.type === 'transition' && arc.from.id > element.id) {
+          return { ...arc, from: { ...arc.from, id: arc.from.id - 1 } };
+        }
+        if (arc.to.type === 'transition' && arc.to.id > element.id) {
+          return { ...arc, to: { ...arc.to, id: arc.to.id - 1 } };
+        }
+        return arc;
+      });
+      
+      setArcs(updatedArcs);
+    }
+  };
+
+  const toggleSimulation = () => {
+    setIsSimulating(!isSimulating);
+    if (isSimulating) {
+      // Reset timers when stopping
+      setTransitionTimers({});
+    }
+  };
+
+  const resetSimulation = () => {
+    setIsSimulating(false);
+    setSimulationTime(0);
+    setTransitionTimers({});
+  };
+
+  // Simulation loop
+  useEffect(() => {
+    if (!isSimulating) return;
+
+    const interval = setInterval(() => {
+      setSimulationTime(prev => prev + 100);
+      
+      // Auto-fire timed transitions
+      setTransitionTimers(prev => {
+        const newTimers = { ...prev };
+        
+        transitions.forEach((transition, index) => {
+          if (transition.isTimed && isTransitionEnabled(index)) {
+            // Initialize timer if it doesn't exist
+            if (!newTimers[index] || !newTimers[index].active) {
+              newTimers[index] = { active: true, elapsed: 0 };
+            }
+            
+            // Update elapsed time
+            newTimers[index].elapsed += 100;
+            
+            // Fire if delay is reached
+            if (newTimers[index].elapsed >= transition.delay) {
+              fireTransition(index);
+              // Reset the timer for this transition
+              newTimers[index] = { active: false, elapsed: 0 };
+            }
+          } else if (transition.isTimed && !isTransitionEnabled(index)) {
+            // Reset timer if transition is no longer enabled
+            newTimers[index] = { active: false, elapsed: 0 };
+          }
+        });
+        
+        return newTimers;
+      });
+    }, 100);
+
+    return () => clearInterval(interval);
+  }, [isSimulating, transitions, places]);
+
+  // Analysis functions
+  const getCurrentMarking = () => {
+    return places.map(p => p.tokens || 0);
+  };
+
+  const getEnabledTransitions = () => {
+    return transitions.map((_, index) => isTransitionEnabled(index));
+  };
+
+  const checkDeadlock = () => {
+    const enabledTransitions = getEnabledTransitions();
+    const hasDeadlock = !enabledTransitions.some(enabled => enabled);
+    
+    const output = `=== Deadlock Analysis ===\n\n` +
+      `Current Marking: [${getCurrentMarking().join(', ')}]\n` +
+      `Enabled Transitions: ${enabledTransitions.map((enabled, i) => enabled ? `T${i+1}` : '').filter(Boolean).join(', ') || 'None'}\n\n` +
+      `Result: ${hasDeadlock ? '❌ DEADLOCK DETECTED!' : '✅ No deadlock - at least one transition is enabled'}`;
+    
+    setAnalysisOutput(output);
+    addToHistory('Deadlock Check', output);
+  };
+
+  const detectAndShowConflicts = () => {
+    const conflicts = detectConflicts();
+    const output = `=== Conflict Analysis ===\n\n` +
+      `Found ${conflicts.length} potential conflicts:\n\n` +
+      conflicts.map(c => 
+        `Conflict between T${c.t1+1} and T${c.t2+1}\n` +
+        `Shared places: ${c.shared.map(p => `P${p+1}`).join(', ')}\n` +
+        `Resolution: ${conversionOptions.conflictResolution}\n`
+      ).join('\n') || 'No conflicts detected.';
+    
+    setAnalysisOutput(output);
+    addToHistory('Conflict Analysis', output);
+  };
+
+  const generateSafetyReport = () => {
+    const validation = validatePetriNet();
+    const conflicts = detectConflicts();
+    
+    const output = `=== Safety Report ===\n\n` +
+      `Safety Level: ${conversionOptions.safetyLevel}\n` +
+      `Validation Status: ${validation.isValid ? '✅ Valid' : '❌ Invalid'}\n\n` +
+      `Critical Issues:\n` +
+      `- Deadlock States: ${reachabilityGraph?.deadlocks.length || 'Not analyzed'}\n` +
+      `- Conflicts: ${conflicts.length}\n` +
+      `- Isolated Places: ${validation.errors.filter(e => e.includes('isolated')).length}\n\n` +
+      `Recommendations:\n` +
+      (conversionOptions.safetyLevel === 'NONE' ? '- Enable safety level for industrial applications\n' : '') +
+      (conflicts.length > 0 ? '- Resolve conflicts with priority or mutex logic\n' : '') +
+      (validation.errors.length > 0 ? '- Fix validation errors before deployment\n' : '');
+    
+    setAnalysisOutput(output);
+    addToHistory('Safety Report', output);
+  };
+
+  const generateDiagnostics = () => {
+    return `\n(* Diagnostics *)\n` +
+      `VAR diag_cycle_time : TIME; END_VAR\n` +
+      `VAR diag_transitions_fired : ARRAY[0..${transitions.length-1}] OF INT; END_VAR\n` +
+      `VAR diag_max_tokens : ARRAY[0..${places.length-1}] OF INT; END_VAR\n\n` +
+      `(* Update diagnostics *)\n` +
+      transitions.map((_, i) => 
+        `|--[T${i+1}]--[diag_transitions_fired[${i}] := diag_transitions_fired[${i}] + 1]--|\n`
+      ).join('');
+  };
+
+  const addSafetyInterlocks = () => {
+    setConversionOptions(prev => ({
+      ...prev,
+      safetyLevel: prev.safetyLevel === 'NONE' ? 'SIL1' : prev.safetyLevel
+    }));
+    setAnalysisOutput('Safety interlocks will be added during conversion based on safety level.');
+  };
+
+  const addEmergencyStop = () => {
+    // Add emergency stop logic to conversion options
+    setConversionOptions(prev => ({
+      ...prev,
+      emergencyStop: true
+    }));
+    setAnalysisOutput('Emergency stop logic will be added during conversion.');
+  };
+
+  const addWatchdogTimers = () => {
+    setConversionOptions(prev => ({
+      ...prev,
+      generateDiagnostics: true,
+      watchdogTimers: true
+    }));
+    setAnalysisOutput('Watchdog timers will be added to monitor transition timeouts.');
+  };
+
+  const generateDocumentation = () => {
+    const doc = `Petri Net Documentation\n` +
+      `Generated: ${new Date().toLocaleString()}\n\n` +
+      `1. NETWORK STRUCTURE\n` +
+      `   Places: ${places.length}\n` +
+      `   Transitions: ${transitions.length}\n` +
+      `   Arcs: ${arcs.length}\n\n` +
+      `2. I/O MAPPING\n` +
+      Object.entries(ioMapping).map(([key, value]) => 
+        `   ${key}: ${value.address} - ${value.description}`
+      ).join('\n') +
+      `\n\n3. TIMING SPECIFICATIONS\n` +
+      transitions.filter(t => t.isTimed).map((t, i) => 
+        `   T${i+1}: ${t.delay}ms`
+      ).join('\n') +
+      `\n\n4. SAFETY CONFIGURATION\n` +
+      `   Safety Level: ${conversionOptions.safetyLevel}\n` +
+      `   PLC Type: ${conversionOptions.plcType}\n`;
+    
+    // Create download link
+    const blob = new Blob([doc], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'petri_net_documentation.txt';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  // File operations
+  const resetAll = () => {
+    if (window.confirm('Are you sure you want to create a new project? All unsaved changes will be lost.')) {
+      setPlaces([]);
+      setTransitions([]);
+      setArcs([]);
+      setIoMapping({});
+      setPriorities({});
+      setWeights({});
+      setArcTypes({});
+      setAnalysisOutput('');
+      setLadderOutput('');
+      setAnalysisHistory([]);
+    }
+  };
+
+  const saveProject = () => {
+    const project = {
+      places,
+      transitions,
+      arcs,
+      ioMapping,
+      priorities,
+      weights,
+      arcTypes,
+      conversionOptions
+    };
+    
+    const jsonString = JSON.stringify(project, null, 2);
+    const blob = new Blob([jsonString], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'petri_net_project.json';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  const loadProject = () => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.json';
+    input.onchange = (e) => {
+      const file = e.target.files[0];
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        try {
+          const project = JSON.parse(event.target.result);
+          setPlaces(project.places || []);
+          setTransitions(project.transitions || []);
+          setArcs(project.arcs || []);
+          setIoMapping(project.ioMapping || {});
+          setPriorities(project.priorities || {});
+          setWeights(project.weights || {});
+          setArcTypes(project.arcTypes || {});
+          setConversionOptions(project.conversionOptions || conversionOptions);
+        } catch (error) {
+          alert('Error loading project file');
+        }
+      };
+      reader.readAsText(file);
+    };
+    input.click();
+  };
+
+  const exportLadder = () => {
+    if (!ladderOutput) {
+      alert('Please convert to ladder logic first');
+      return;
+    }
+    
+    const blob = new Blob([ladderOutput], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `ladder_logic_${conversionOptions.plcType.toLowerCase()}.txt`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  // Advanced analysis functions (reachability, liveness)
+  const generateReachabilityGraph = () => {
+    const initialMarking = getCurrentMarking();
+    const graph = {
+      nodes: [],
+      edges: [],
+      deadlocks: [],
+      liveTransitions: new Set()
+    };
+    
+    const visited = new Set();
+    const queue = [{marking: initialMarking, id: 0}];
+    visited.add(JSON.stringify(initialMarking));
+    graph.nodes.push({id: 0, marking: initialMarking});
+    
+    let nodeId = 1;
+    
+    while (queue.length > 0) {
+      const current = queue.shift();
+      let hasEnabledTransition = false;
+      
+      // Check each transition
+      transitions.forEach((transition, tIndex) => {
+        if (isTransitionEnabledForMarking(tIndex, current.marking)) {
+          hasEnabledTransition = true;
+          graph.liveTransitions.add(tIndex);
+          
+          // Calculate new marking after firing
+          const newMarking = fireTransitionForMarking(tIndex, current.marking);
+          const markingKey = JSON.stringify(newMarking);
+          
+          // Check if we've seen this marking before
+          let targetNodeId;
+          const existingNode = graph.nodes.find(node => 
+            markingsEqual(node.marking, newMarking)
+          );
+          
+          if (existingNode) {
+            targetNodeId = existingNode.id;
+          } else if (!visited.has(markingKey)) {
+            // New marking
+            targetNodeId = nodeId++;
+            visited.add(markingKey);
+            graph.nodes.push({id: targetNodeId, marking: newMarking});
+            queue.push({marking: newMarking, id: targetNodeId});
+          }
+          
+          if (targetNodeId !== undefined) {
+            graph.edges.push({
+              from: current.id,
+              to: targetNodeId,
+              transition: tIndex,
+              label: `T${tIndex + 1}`
+            });
+          }
+        }
+      });
+      
+      // Check for deadlock
+      if (!hasEnabledTransition) {
+        graph.deadlocks.push(current.id);
+      }
+    }
+    
+    return graph;
+  };
+
+  const markingsEqual = (m1, m2) => {
+    return m1.length === m2.length && m1.every((val, idx) => val === m2[idx]);
+  };
+
+  const isTransitionEnabledForMarking = (transitionIndex, marking) => {
+    const inputArcs = arcs.filter(arc => 
+      arc.to.type === 'transition' && arc.to.id === transitionIndex
+    );
+    
+    return inputArcs.every(arc => {
+      if (arc.from.type === 'place') {
+        const arcKey = `${arc.from.type}_${arc.from.id}_${arc.to.type}_${arc.to.id}`;
+        const arcType = arcTypes[arcKey] || 'normal';
+        const weight = weights[arcKey] || 1;
+        
+        if (arcType === 'inhibitor') {
+          return marking[arc.from.id] === 0;
+        } else {
+          return marking[arc.from.id] >= weight;
+        }
+      }
+      return false;
+    });
+  };
+
+  const fireTransitionForMarking = (transitionIndex, marking) => {
+    const newMarking = [...marking];
+    const inputArcs = arcs.filter(arc => 
+      arc.to.type === 'transition' && arc.to.id === transitionIndex
+    );
+    const outputArcs = arcs.filter(arc => 
+      arc.from.type === 'transition' && arc.from.id === transitionIndex
+    );
+    
+    // Remove tokens from input places
+    inputArcs.forEach(arc => {
+      if (arc.from.type === 'place') {
+        const arcKey = `${arc.from.type}_${arc.from.id}_${arc.to.type}_${arc.to.id}`;
+        const arcType = arcTypes[arcKey] || 'normal';
+        const weight = weights[arcKey] || 1;
+        
+        if (arcType !== 'inhibitor') {
+          newMarking[arc.from.id] = Math.max(0, newMarking[arc.from.id] - weight);
+        }
+      }
+    });
+    
+    // Add tokens to output places
+    outputArcs.forEach(arc => {
+      if (arc.to.type === 'place') {
+        const arcKey = `${arc.from.type}_${arc.from.id}_${arc.to.type}_${arc.to.id}`;
+        const weight = weights[arcKey] || 1;
+        newMarking[arc.to.id] = (newMarking[arc.to.id] || 0) + weight;
+      }
+    });
+    
+    return newMarking;
+  };
+
+  const analyzeReachability = () => {
+    const graph = generateReachabilityGraph();
+    setReachabilityGraph(graph);
+    
+    const output = `=== Full Reachability Analysis ===\n\n` +
+      `Total States: ${graph.nodes.length}\n` +
+      `Total Transitions in Graph: ${graph.edges.length}\n` +
+      `Deadlock States: ${graph.deadlocks.length}\n\n` +
+      `States:\n` +
+      graph.nodes.map(node => 
+        `S${node.id}: [${node.marking.join(', ')}]${graph.deadlocks.includes(node.id) ? ' (DEADLOCK)' : ''}`
+      ).join('\n') +
+      `\n\nTransitions:\n` +
+      graph.edges.map(edge => 
+        `S${edge.from} --${edge.label}--> S${edge.to}`
+      ).join('\n') +
+      `\n\nDeadlock Analysis:\n` +
+      (graph.deadlocks.length === 0 ? 
+        '✅ No deadlocks found!' : 
+        `❌ Deadlocks found in states: ${graph.deadlocks.map(id => `S${id}`).join(', ')}`);
+    
+    setAnalysisOutput(output);
+    addToHistory('Reachability Analysis', output);
+  };
+
+  const analyzeLiveness = () => {
+    const graph = generateReachabilityGraph();
+    
+    // Check different levels of liveness
+    const livenessResults = transitions.map((transition, tIndex) => {
+      const transitionName = `T${tIndex + 1}`;
+      
+      // L0: Can the transition fire at least once?
+      const canFire = graph.edges.some(edge => edge.transition === tIndex);
+      
+      // L1: Can the transition fire from some reachable state?
+      const isL1Live = graph.liveTransitions.has(tIndex);
+      
+      // L4: Is the transition live in all reachable states?
+      const isL4Live = graph.nodes.every(node => {
+        // Skip deadlock states
+        if (graph.deadlocks.includes(node.id)) return true;
+        
+        // Check if there's a path from this state that eventually enables this transition
+        const visited = new Set();
+        const queue = [node.id];
+        
+        while (queue.length > 0) {
+          const currentId = queue.shift();
+          if (visited.has(currentId)) continue;
+          visited.add(currentId);
+          
+          // Check if transition is enabled in this state
+          const currentNode = graph.nodes.find(n => n.id === currentId);
+          if (isTransitionEnabledForMarking(tIndex, currentNode.marking)) {
+            return true;
+          }
+          
+          // Add successor states
+          graph.edges
+            .filter(edge => edge.from === currentId)
+            .forEach(edge => queue.push(edge.to));
+        }
+        
+        return false;
+      });
+      
+      return {
+        transition: transitionName,
+        canFire,
+        isL1Live,
+        isL4Live
+      };
+    });
+    
+    const output = `=== Full Liveness Analysis ===\n\n` +
+      `Transition Liveness Results:\n\n` +
+      livenessResults.map(result => 
+        `${result.transition}:\n` +
+        `  L0 (Can fire at least once): ${result.canFire ? '✅' : '❌'}\n` +
+        `  L1 (Can fire from some state): ${result.isL1Live ? '✅' : '❌'}\n` +
+        `  L4 (Live in all states): ${result.isL4Live ? '✅' : '❌'}\n`
+      ).join('\n') +
+      `\nOverall Liveness:\n` +
+      `- Dead transitions: ${livenessResults.filter(r => !r.canFire).map(r => r.transition).join(', ') || 'None'}\n` +
+      `- L1-live transitions: ${livenessResults.filter(r => r.isL1Live).map(r => r.transition).join(', ') || 'None'}\n` +
+      `- L4-live transitions: ${livenessResults.filter(r => r.isL4Live).map(r => r.transition).join(', ') || 'None'}`;
+    
+    setAnalysisOutput(output);
+    addToHistory('Liveness Analysis', output);
+  };
+
+  const runCompleteAnalysis = () => {
+    const validation = validatePetriNet();
+    const graph = generateReachabilityGraph();
+    const conflicts = detectConflicts();
+    
+    const summary = `=== COMPLETE PETRI NET ANALYSIS ===\n\n` +
+      `Timestamp: ${new Date().toLocaleString()}\n\n` +
+      `SUMMARY:\n` +
+      `- Total Places: ${places.length}\n` +
+      `- Total Transitions: ${transitions.length}\n` +
+      `- Total States: ${graph.nodes.length}\n` +
+      `- Deadlock States: ${graph.deadlocks.length}\n` +
+      `- Conflicts: ${conflicts.length}\n` +
+      `- Validation Status: ${validation.isValid ? '✅ Valid' : '❌ Invalid'}\n\n` +
+      `KEY PROPERTIES:\n` +
+      `- Is Safe: ${graph.deadlocks.length === 0 ? '✅ Yes' : '❌ No'}\n` +
+      `- Has Conflicts: ${conflicts.length > 0 ? '⚠️ Yes' : '✅ No'}\n` +
+      `- Safety Level: ${conversionOptions.safetyLevel}\n` +
+      `- PLC Type: ${conversionOptions.plcType}\n\n` +
+      `ISSUES TO ADDRESS:\n` +
+      `${validation.errors.map(e => `❌ ${e}`).join('\n')}\n` +
+      `${validation.warnings.map(w => `⚠️ ${w}`).join('\n')}\n\n` +
+      `RECOMMENDATIONS:\n` +
+      (graph.deadlocks.length > 0 ? '- Resolve deadlock conditions\n' : '') +
+      (conflicts.length > 0 ? '- Implement conflict resolution strategy\n' : '') +
+      (validation.errors.length > 0 ? '- Fix validation errors before conversion\n' : '') +
+      (conversionOptions.safetyLevel === 'NONE' ? '- Consider adding safety level for industrial applications\n' : '');
+    
+    setAnalysisOutput(summary);
+    addToHistory('Complete Analysis', summary);
+  };
+
+  const addToHistory = (type, result) => {
+    const timestamp = new Date().toLocaleTimeString();
+    setAnalysisHistory(prev => [{
+      timestamp,
+      type,
+      result
+    }, ...prev].slice(0, 10)); // Keep last 10 results
+  };
+
+  // Component rendering
+  return (
+    <div className="flex flex-col h-screen bg-gray-100">
+      {/* Menu Bar */}
+      <div className="bg-white shadow-md">
+        <div className="flex items-center p-2 border-b">
+          {Object.entries(menuItems).map(([key, menu]) => (
+            <DropdownMenu
+              key={key}
+              menu={menu}
+              isOpen={activeDropdown === menu.title}
+              onToggle={(title) => setActiveDropdown(activeDropdown === title ? null : title)}
+            />
+          ))}
+          <div className="ml-auto flex items-center gap-4 px-4">
+            <div className="text-sm">
+              <span className="font-medium">PLC: </span>
+              {conversionOptions.plcType}
+            </div>
+            <div className="text-sm">
+              <span className="font-medium">Safety: </span>
+              {conversionOptions.safetyLevel}
+            </div>
+            <button
+              onClick={convertToLadderAdvanced}
+              className="px-4 py-1 bg-green-500 text-white rounded hover:bg-green-600"
+            >
+              Convert
+            </button>
+          </div>
+        </div>
+        
+        {/* Quick Access Toolbar */}
+        <div className="flex items-center gap-2 p-2">
+          <button
+            onClick={() => setMode('PLACE')}
+            className={`p-2 rounded ${mode === 'PLACE' ? 'bg-blue-100' : 'hover:bg-gray-100'}`}
+            title="Place"
+          >
+            <Circle size={18} />
+          </button>
+          <button
+            onClick={() => setMode('TRANSITION')}
+            className={`p-2 rounded ${mode === 'TRANSITION' ? 'bg-blue-100' : 'hover:bg-gray-100'}`}
+            title="Transition"
+          >
+            <Square size={18} />
+          </button>
+          <button
+            onClick={() => setMode('ARC')}
+            className={`p-2 rounded ${mode === 'ARC' ? 'bg-blue-100' : 'hover:bg-gray-100'}`}
+            title="Arc"
+          >
+            <ArrowRight size={18} />
+          </button>
+          <button
+            onClick={() => setMode('TOKEN')}
+            className={`p-2 rounded ${mode === 'TOKEN' ? 'bg-blue-100' : 'hover:bg-gray-100'}`}
+            title="Add Token"
+          >
+            <Plus size={18} />
+          </button>
+          <div className="border-l mx-2 h-6"></div>
+          <button
+            onClick={toggleSimulation}
+            className={`p-2 rounded ${isSimulating ? 'bg-red-100' : 'hover:bg-gray-100'}`}
+            title={isSimulating ? 'Stop Simulation' : 'Start Simulation'}
+          >
+            {isSimulating ? <PauseCircle size={18} /> : <PlayCircle size={18} />}
+          </button>
+          <button
+            onClick={resetSimulation}
+            className="p-2 rounded hover:bg-gray-100"
+            title="Reset"
+          >
+            <RotateCcw size={18} />
+          </button>
+          <div className="border-l mx-2 h-6"></div>
+          <button
+            onClick={() => setMode('DELETE')}
+            className={`p-2 rounded ${mode === 'DELETE' ? 'bg-red-100' : 'hover:bg-gray-100'}`}
+            title="Delete"
+          >
+            <Trash2 size={18} />
+          </button>
+          <div className="ml-auto text-sm text-gray-600">
+            Mode: <strong>{mode}</strong>
+            {isSimulating && ` | Time: ${simulationTime}ms`}
+          </div>
+        </div>
+      </div>
+
+      {/* Main Content Area */}
+      <div className="flex-1 flex overflow-hidden">
+        {/* Canvas */}
+        <div className="flex-1 p-4">
+          <div className="bg-white rounded-lg shadow-md h-full p-4">
+            <canvas
+              ref={canvasRef}
+              width={800}
+              height={500}
+              onClick={handleCanvasClick}
+              className="border border-gray-300 rounded cursor-crosshair"
+            />
+          </div>
+        </div>
+
+        {/* Side Panel */}
+        <div className="w-96 p-4">
+          <div className="bg-white rounded-lg shadow-md h-full flex flex-col">
+            {/* Tab Navigation */}
+            <div className="flex border-b">
+              <button
+                onClick={() => setActiveTab('output')}
+                className={`flex-1 px-4 py-2 text-sm font-medium ${
+                  activeTab === 'output' ? 'border-b-2 border-blue-500 text-blue-600' : 'text-gray-600'
+                }`}
+              >
+                Output
+              </button>
+              <button
+                onClick={() => setActiveTab('analysis')}
+                className={`flex-1 px-4 py-2 text-sm font-medium ${
+                  activeTab === 'analysis' ? 'border-b-2 border-blue-500 text-blue-600' : 'text-gray-600'
+                }`}
+              >
+                Analysis
+              </button>
+              <button
+                onClick={() => setActiveTab('io-config')}
+                className={`flex-1 px-4 py-2 text-sm font-medium ${
+                  activeTab === 'io-config' ? 'border-b-2 border-blue-500 text-blue-600' : 'text-gray-600'
+                }`}
+              >
+                I/O Config
+              </button>
+              <button
+                onClick={() => setActiveTab('properties')}
+                className={`flex-1 px-4 py-2 text-sm font-medium ${
+                  activeTab === 'properties' ? 'border-b-2 border-blue-500 text-blue-600' : 'text-gray-600'
+                }`}
+              >
+                Properties
+              </button>
+            </div>
+
+            {/* Tab Content */}
+            <div className="flex-1 p-4 overflow-auto">
+              {activeTab === 'output' && (
+                <pre className="bg-gray-100 p-4 rounded h-full font-mono text-sm overflow-auto whitespace-pre-wrap">
+                  {ladderOutput || 'Click Convert to generate ladder logic'}
+                </pre>
+              )}
+              
+              {activeTab === 'analysis' && (
+                <pre className="bg-gray-100 p-4 rounded h-full font-mono text-sm overflow-auto whitespace-pre-wrap">
+                  {analysisOutput || 'Run analysis from the Analysis menu'}
+                </pre>
+              )}
+              
+              {activeTab === 'io-config' && (
+                <div className="space-y-4">
+                  <h3 className="font-medium text-lg">I/O Configuration</h3>
+                  {places.map((place, index) => (
+                    <div key={index} className="flex items-center gap-2">
+                      <label className="w-16">P{index + 1}:</label>
+                      <input
+                        type="text"
+                        placeholder="Address (e.g., I0.0)"
+                        className="flex-1 px-2 py-1 border rounded text-sm"
+                        value={ioMapping[`P${index + 1}`]?.address || ''}
+                        onChange={(e) => {
+                          setIoMapping(prev => ({
+                            ...prev,
+                            [`P${index + 1}`]: {
+                              ...prev[`P${index + 1}`],
+                              address: e.target.value
+                            }
+                          }));
+                        }}
+                      />
+                      <input
+                        type="text"
+                        placeholder="Description"
+                        className="flex-1 px-2 py-1 border rounded text-sm"
+                        value={ioMapping[`P${index + 1}`]?.description || ''}
+                        onChange={(e) => {
+                          setIoMapping(prev => ({
+                            ...prev,
+                            [`P${index + 1}`]: {
+                              ...prev[`P${index + 1}`],
+                              description: e.target.value
+                            }
+                          }));
+                        }}
+                      />
+                    </div>
+                  ))}
+                </div>
+              )}
+              
+              {activeTab === 'properties' && (
+                <div className="space-y-4">
+                  <h3 className="font-medium text-lg">Element Properties</h3>
+                  <p className="text-sm text-gray-600">
+                    Click on an element to view and edit its properties
+                  </p>
+                  {/* Property editor would go here */}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Timed Transition Dialog */}
+      {showTimedDialog && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white p-6 rounded-lg shadow-lg">
+            <h3 className="text-lg font-semibold mb-4">Create Timed Transition</h3>
+            <div className="mb-4">
+              <label className="block text-sm font-medium mb-2">
+                Delay (milliseconds):
+              </label>
+              <input
+                type="number"
+                value={timedDelay}
+                onChange={(e) => setTimedDelay(e.target.value)}
+                className="w-full px-3 py-2 border rounded"
+                min="0"
+              />
+            </div>
+            <div className="flex gap-3">
+              <button
+                onClick={() => {
+                  if (pendingTimedTransition && !isNaN(parseInt(timedDelay))) {
+                    setTransitions([...transitions, {
+                      x: pendingTimedTransition.x,
+                      y: pendingTimedTransition.y,
+                      isTimed: true,
+                      delay: parseInt(timedDelay)
+                    }]);
+                  }
+                  setShowTimedDialog(false);
+                  setPendingTimedTransition(null);
+                  setTimedDelay('1000');
+                }}
+                className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
+              >
+                Create
+              </button>
+              <button
+                onClick={() => {
+                  setShowTimedDialog(false);
+                  setPendingTimedTransition(null);
+                }}
+                className="px-4 py-2 bg-gray-300 rounded hover:bg-gray-400"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default PetriNetToLadderConverter;
